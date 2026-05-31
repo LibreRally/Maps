@@ -1,0 +1,22 @@
+<Project Sdk="Aspire.AppHost.Sdk/13.3.0">
+
+  <ItemGroup>
+    <ProjectReference Include="..\TileServer\LibreRally.Maps.TileServer.csproj" />
+    <ProjectReference Include="..\Processing\LibreRally.Maps.Processing.csproj" />
+    <ProjectReference Include="..\WebUI\LibreRally.Maps.WebUI.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Aspire.Hosting.Docker" Version="13.3.0" />
+    <PackageReference Include="Aspire.Hosting.PostgreSQL" Version="13.3.0" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <UserSecretsId>f8445185-1c7d-4a70-aa1f-4b20cc1a6050</UserSecretsId>
+  </PropertyGroup>
+
+</Project>

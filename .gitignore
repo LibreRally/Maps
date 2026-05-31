@@ -55,3 +55,28 @@ CodeCoverage/
 *.VisualState.xml
 TestResult.xml
 nunit-*.xml
+
+*.log
+*.vsidx
+data/pipeline-input/
+data/raw/
+data/processed/
+data/training/
+data/tiles/
+data/models/
+**/__pycache__/
+src/ml-service/.venv/
+src/ml-service/data/
+
+# Local geodata — not for public repos
+cloth_nodes.txt
+
+# Tooling artifacts
+.vs/
+.playwright/
+.playwright-cli/
+.playwright-mcp/
+.sisyphus/
+
+# Temp scripts
+temp-*

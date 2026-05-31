@@ -1,0 +1,87 @@
+@page "/"
+@using LibreRally.Maps.WebUI
+@inject TileApiClient Api
+@rendermode InteractiveServer
+
+<PageTitle>Dashboard — LibreRally Maps</PageTitle>
+
+<div class="container-fluid">
+    <h3 class="mb-4">Dashboard</h3>
+
+    @if (stats is null)
+    {
+        <div class="text-center"><div class="spinner-border"></div><p class="mt-2">Loading...</p></div>
+    }
+    else
+    {
+        <div class="row g-3">
+            <div class="col-md-3"><div class="card text-bg-primary"><div class="card-body">
+                <h5>@stats.TileCount</h5><small>Tiles</small></div></div></div>
+            <div class="col-md-3"><div class="card text-bg-warning"><div class="card-body">
+                <h5>@stats.PendingCorrections</h5><small>Pending</small></div></div></div>
+            <div class="col-md-3"><div class="card text-bg-success"><div class="card-body">
+                <h5>@stats.ApprovedCorrections</h5><small>Approved</small></div></div></div>
+            <div class="col-md-3"><div class="card text-bg-info"><div class="card-body">
+                <h5>@(stats.ApiHealthy ? "Online" : "Offline")</h5><small>API</small></div></div></div>
+        </div>
+
+        <h5 class="mt-4">Recent Tiles</h5>
+        <table class="table table-sm">
+            <thead><tr><th>Tile</th><th>Features</th><th>Created</th></tr></thead>
+            <tbody>
+                @foreach (var t in stats.RecentTiles)
+                {
+                    <tr><td>(@t.TileX, @t.TileY)</td><td>@string.Join(", ", t.FeatureTypes ?? [])</td>
+                    <td>@t.CreatedAt.ToLocalTime().ToString("g")</td></tr>
+                }
+                @if (!stats.RecentTiles.Any()) { <tr><td colspan="3" class="text-muted">No tiles yet</td></tr> }
+            </tbody>
+        </table>
+
+        <h5 class="mt-3">Recent Corrections</h5>
+        <table class="table table-sm">
+            <thead><tr><th>Type</th><th>Change</th><th>Status</th><th>When</th></tr></thead>
+            <tbody>
+                @foreach (var c in stats.RecentCorrections)
+                {
+                    <tr><td>@c.CorrectionType</td><td>@c.OldLabel → @c.NewLabel</td>
+                    <td><span class="badge @(c.Reviewed ? (c.Approved ? "bg-success" : "bg-danger") : "bg-secondary")">
+                        @(c.Reviewed ? (c.Approved ? "approved" : "rejected") : "pending")</span></td>
+                    <td>@c.SubmittedAt.ToLocalTime().ToString("g")</td></tr>
+                }
+                @if (!stats.RecentCorrections.Any()) { <tr><td colspan="4" class="text-muted">No corrections yet</td></tr> }
+            </tbody>
+        </table>
+    }
+</div>
+
+@code {
+    private DashboardStats? stats;
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            var tiles = await Api.GetTileCatalogAsync();
+            var pending = await Api.GetCorrectionsAsync(false);
+            var approved = await Api.GetCorrectionsAsync(true);
+            stats = new()
+            {
+                TileCount = tiles.Count, PendingCorrections = pending.Count,
+                ApprovedCorrections = approved.Count(c => c.Approved),
+                ApiHealthy = await Api.IsHealthyAsync(),
+                RecentTiles = tiles.Take(5).ToList(),
+                RecentCorrections = pending.Take(5).ToList(),
+            };
+        }
+        catch { stats = new(); }
+    }
+
+    private class DashboardStats
+    {
+        public int TileCount, PendingCorrections, ApprovedCorrections;
+        public bool ApiHealthy;
+        public List<TileEntry> RecentTiles = [];
+        public List<CorrectionItem> RecentCorrections = [];
+    }
+}

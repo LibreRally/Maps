@@ -1,0 +1,253 @@
+@page "/corrections"
+@using LibreRally.Maps.WebUI
+@inject TileApiClient Api
+@rendermode InteractiveServer
+
+<PageTitle>Segment Reviews</PageTitle>
+
+<div class="container-fluid">
+    <h3 class="mb-4">Segment Reviews</h3>
+
+    <ul class="nav nav-tabs mb-3">
+        @foreach (var t in new[] { "queue", "pending", "approved", "training" })
+        {
+            var tabName = t;
+            <li class="nav-item">
+                <button class="nav-link @(tab == tabName ? "active" : "")"
+                        @onclick="() => SwitchTab(tabName)">
+                    @(tabName == "queue" ? "Review Queue" : char.ToUpper(tabName[0]) + tabName[1..])
+                </button>
+            </li>
+        }
+    </ul>
+
+    @if (tab == "queue")
+    {
+        <div class="row g-3">
+            <div class="col-lg-7">
+                <div class="card">
+                    <div class="card-header">Detected segments</div>
+                    <div class="card-body p-0" style="max-height: 560px; overflow-y:auto">
+                        <table class="table table-sm table-hover mb-0">
+                            <thead><tr><th>Tile</th><th>Segment</th><th>Prediction</th><th>OSM</th><th>Pts</th></tr></thead>
+                            <tbody>
+                                @foreach (var segment in segments)
+                                {
+                                    <tr class="@(selectedSegment?.Id == segment.Id ? "table-active" : "")"
+                                        @onclick="() => SelectSegment(segment)" style="cursor:pointer">
+                                        <td>@segment.TileId.ToString()[..8]</td>
+                                        <td>#@segment.LocalSegmentId</td>
+                                        <td>
+                                            <div>@(segment.ReviewedLabel ?? segment.PredictedLabel)</div>
+                                            <div class="small text-muted">conf @((segment.Confidence ?? 0f).ToString("0.00"))</div>
+                                        </td>
+                                        <td>
+                                            <div>@(string.IsNullOrWhiteSpace(segment.OsmName) ? (segment.OsmFeatureType ?? segment.OsmMatchStatus) : segment.OsmName)</div>
+                                            <div class="small text-muted">@segment.OsmMatchStatus</div>
+                                        </td>
+                                        <td>@segment.PointCount.ToString("N0")</td>
+                                    </tr>
+                                }
+                                @if (!segments.Any())
+                                {
+                                    <tr><td colspan="5" class="text-muted p-3">No segment metadata is available yet.</td></tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-lg-5">
+                <div class="card">
+                    <div class="card-header">Submit review</div>
+                    <div class="card-body">
+                        @if (selectedSegment is null)
+                        {
+                            <div class="text-muted">Select a segment from the queue to submit a review.</div>
+                        }
+                        else
+                        {
+                            <div class="mb-3">
+                                <div><strong>Segment</strong> #@selectedSegment.LocalSegmentId</div>
+                                <div><strong>Current label</strong> @(selectedSegment.ReviewedLabel ?? selectedSegment.PredictedLabel)</div>
+                                <div><strong>OSM match</strong> @(string.IsNullOrWhiteSpace(selectedSegment.OsmName) ? (selectedSegment.OsmFeatureType ?? selectedSegment.OsmMatchStatus) : selectedSegment.OsmName)</div>
+                            </div>
+
+                            <div class="mb-3">
+                                <label class="form-label">Correction type</label>
+                                <select class="form-select" @bind="reviewType">
+                                    <option value="reclassify">Reclassify</option>
+                                    <option value="split">Needs split</option>
+                                    <option value="merge">Needs merge</option>
+                                </select>
+                            </div>
+
+                            <div class="mb-3">
+                                <label class="form-label">Requested label</label>
+                                <select class="form-select" @bind="requestedLabel" disabled="@(reviewType != "reclassify")">
+                                    @foreach (var label in labels)
+                                    {
+                                        <option value="@label">@label</option>
+                                    }
+                                </select>
+                            </div>
+
+                            <div class="mb-3">
+                                <label class="form-label">Related segment ids</label>
+                                <input class="form-control" @bind="relatedSegmentIds" placeholder="For merge/split context, e.g. 12,15" />
+                            </div>
+
+                            <div class="mb-3">
+                                <label class="form-label">Notes</label>
+                                <textarea class="form-control" rows="4" @bind="reviewNotes"></textarea>
+                            </div>
+
+                            <div class="mb-3">
+                                <label class="form-label">Submitted by</label>
+                                <input class="form-control" @bind="submittedBy" placeholder="your name" />
+                            </div>
+
+                            <button class="btn btn-primary" @onclick="SubmitReview">Submit review</button>
+                            @if (!string.IsNullOrWhiteSpace(submitMsg))
+                            {
+                                <div class="alert alert-info mt-3">@submitMsg</div>
+                            }
+                        }
+                    </div>
+                </div>
+            </div>
+        </div>
+    }
+    else if (tab == "pending")
+    {
+        <table class="table table-sm">
+            <thead><tr><th>Segment</th><th>Type</th><th>Change</th><th>By</th><th>When</th><th>Actions</th></tr></thead>
+            <tbody>
+                @foreach (var review in pending)
+                {
+                    <tr>
+                        <td>@review.TileId.ToString()[..8] / #@review.LocalSegmentId</td>
+                        <td>@review.CorrectionType</td>
+                        <td>@review.PreviousLabel → @(review.RequestedLabel ?? "(geometry)")</td>
+                        <td>@review.SubmittedBy</td>
+                        <td>@review.SubmittedAt.ToLocalTime().ToString("g")</td>
+                        <td>
+                            <button class="btn btn-sm btn-success me-1" @onclick="() => Review(review.Id, true)">✓</button>
+                            <button class="btn btn-sm btn-danger" @onclick="() => Review(review.Id, false)">✗</button>
+                        </td>
+                    </tr>
+                }
+                @if (!pending.Any()) { <tr><td colspan="6" class="text-muted">No pending reviews</td></tr> }
+            </tbody>
+        </table>
+    }
+    else if (tab == "approved")
+    {
+        <table class="table table-sm">
+            <thead><tr><th>Segment</th><th>Type</th><th>Outcome</th><th>Status</th><th>When</th></tr></thead>
+            <tbody>
+                @foreach (var review in approved)
+                {
+                    <tr>
+                        <td>@review.TileId.ToString()[..8] / #@review.LocalSegmentId</td>
+                        <td>@review.CorrectionType</td>
+                        <td>@review.PreviousLabel → @(review.RequestedLabel ?? "(geometry)")</td>
+                        <td><span class="badge @(review.Approved ? "bg-success" : "bg-danger")">@(review.Approved ? "approved" : "rejected")</span></td>
+                        <td>@review.SubmittedAt.ToLocalTime().ToString("g")</td>
+                    </tr>
+                }
+                @if (!approved.Any()) { <tr><td colspan="5" class="text-muted">No reviewed segment feedback</td></tr> }
+            </tbody>
+        </table>
+    }
+    else if (tab == "training")
+    {
+        <div class="card">
+            <div class="card-body">
+                <h5>Training Export</h5>
+                @if (training is not null)
+                {
+                    <p><strong>@training.Count</strong> approved reviews available for export.</p>
+                    <p><strong>@training.ExportedCount</strong> already marked as exported.</p>
+                    <div class="alert alert-info">Reclassify reviews become corrected label examples; split/merge reviews are exported as segmentation feedback metadata.</div>
+                }
+                <button class="btn btn-outline-primary" @onclick="LoadTraining">Refresh</button>
+            </div>
+        </div>
+    }
+</div>
+
+@code {
+    private readonly string[] labels = ["building", "ground", "high_vegetation", "medium_vegetation", "low_vegetation", "road", "water", "wire", "tower", "unclassified"];
+    private string tab = "queue";
+    private List<TileSegmentItem> segments = [];
+    private List<SegmentReviewItem> pending = [];
+    private List<SegmentReviewItem> approved = [];
+    private SegmentTrainingSummary? training;
+    private TileSegmentItem? selectedSegment;
+    private string reviewType = "reclassify";
+    private string requestedLabel = "building";
+    private string relatedSegmentIds = "";
+    private string reviewNotes = "";
+    private string submittedBy = "";
+    private string submitMsg = "";
+
+    protected override async Task OnInitializedAsync()
+    {
+        await RefreshAll();
+    }
+
+    private async Task RefreshAll()
+    {
+        segments = await Api.GetSegmentsAsync();
+        pending = await Api.GetSegmentReviewsAsync(false);
+        approved = await Api.GetSegmentReviewsAsync(true);
+    }
+
+    private async Task SwitchTab(string nextTab)
+    {
+        tab = nextTab;
+        if (tab == "training")
+            await LoadTraining();
+        StateHasChanged();
+    }
+
+    private void SelectSegment(TileSegmentItem segment)
+    {
+        selectedSegment = segment;
+        requestedLabel = segment.ReviewedLabel ?? segment.PredictedLabel;
+        submitMsg = "";
+    }
+
+    private async Task SubmitReview()
+    {
+        if (selectedSegment is null)
+            return;
+
+        var related = relatedSegmentIds
+            .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+
+        await Api.SubmitSegmentReviewAsync(new(
+            selectedSegment.Id,
+            reviewType,
+            reviewType == "reclassify" ? requestedLabel : null,
+            related.Length == 0 ? null : related,
+            reviewNotes,
+            submittedBy));
+
+        submitMsg = "Segment review submitted.";
+        reviewNotes = "";
+        relatedSegmentIds = "";
+        await RefreshAll();
+    }
+
+    private async Task Review(Guid id, bool approve)
+    {
+        await Api.ReviewSegmentAsync(id, approve);
+        pending = await Api.GetSegmentReviewsAsync(false);
+        approved = await Api.GetSegmentReviewsAsync(true);
+    }
+
+    private async Task LoadTraining() => training = await Api.GetSegmentTrainingSummaryAsync();
+}

@@ -1,0 +1,975 @@
+@page "/viewer"
+@using System.Globalization
+@using LibreRally.Maps.WebUI
+@using Microsoft.JSInterop
+@inject TileApiClient Api
+@inject IJSRuntime JS
+@rendermode InteractiveServer
+
+<PageTitle>3D Viewer — LibreRally Maps</PageTitle>
+
+<style>
+    .viewer-sidebar {
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+    }
+
+    .viewer-sidebar .card {
+        margin-bottom: 0;
+    }
+
+    .viewer-stage {
+        position: relative;
+        height: min(68vh, 720px);
+        min-height: 420px;
+        border-radius: 8px;
+        border: 1px solid #dee2e6;
+        background: #1a1a2e;
+        overflow: hidden;
+    }
+
+    .viewer-surface {
+        position: absolute;
+        inset: 0;
+    }
+
+    .viewer-empty-state {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--bs-secondary-color);
+        pointer-events: none;
+        z-index: 1;
+    }
+
+    .alignment-tool-grid label {
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--bs-secondary-color);
+    }
+
+    .viewer-map-canvas {
+        height: min(42vh, 420px);
+        min-height: 300px;
+        border-radius: 8px;
+        overflow: hidden;
+        border: 1px solid #dee2e6;
+    }
+
+    @@media (min-width: 1200px) {
+        .viewer-sidebar {
+            position: sticky;
+            top: 1rem;
+            max-height: calc(100vh - 2rem);
+            overflow-y: auto;
+            padding-right: 0.25rem;
+        }
+    }
+</style>
+
+<div class="container-fluid">
+    <h3 class="mb-3">3D Viewer</h3>
+
+    <div class="row g-3 align-items-start">
+        <div class="col-12 col-xl-4 col-xxl-3">
+            <div class="viewer-sidebar">
+                <div class="card">
+                    <div class="card-header">Tiles</div>
+                    <div class="card-body p-0" style="max-height: 280px; overflow-y:auto">
+                        <table class="table table-sm table-hover mb-0">
+                            <thead><tr><th>Tile</th><th>Features</th></tr></thead>
+                            <tbody>
+                                @foreach (var t in tiles)
+                                {
+                                    <tr class="@(selectedTile?.Id == t.Id ? "table-active" : "")"
+                                        @onclick="() => SelectTileAsync(t)" style="cursor:pointer">
+                                        <td>(@t.TileX, @t.TileY)</td>
+                                        <td>@string.Join(", ", t.FeatureTypes ?? []) <span class="text-muted">(@(t.SegmentCount ?? 0) segments)</span></td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                        @if (!tiles.Any())
+                        {
+                            <div class="p-3 text-muted">No tiles. <a href="import">Import</a> first.</div>
+                        }
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">Controls</div>
+                    <div class="card-body">
+                        <div class="mb-2">
+                            <button class="btn btn-sm btn-primary w-100" @onclick="LoadMesh" disabled="@(selectedTile is null)">
+                                Load Mesh
+                            </button>
+                        </div>
+                        <div class="mb-2">
+                            <button class="btn btn-sm btn-outline-primary w-100" @onclick="LoadPointCloud" disabled="@(selectedTile is null)">
+                                Load Point Cloud
+                            </button>
+                        </div>
+                        <div class="mb-2">
+                            <button class="btn btn-sm btn-outline-warning w-100" @onclick="ShowWholeTileAsync" disabled="@(selectedSegment is null)">
+                                Show Whole Tile
+                            </button>
+                        </div>
+                        <div>
+                            <button class="btn btn-sm btn-outline-secondary w-100" @onclick="ClearView">
+                                Clear View
+                            </button>
+                        </div>
+                        @if (!string.IsNullOrEmpty(viewerMsg))
+                        {
+                            <div class="alert alert-info mt-2 small">@viewerMsg</div>
+                        }
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">Live Alignment</div>
+                    <div class="card-body">
+                        @if (selectedTile is null)
+                        {
+                            <div class="text-muted small">Select a tile to preview yaw and XY alignment changes against the Vicmaps parcel overlay in real time.</div>
+                        }
+                        else
+                        {
+                            var bakedScanAlignment = GetBakedAlignment();
+                            var savedScanAlignment = GetSavedScanAlignment();
+                            var scanPreviewAlignment = ComposeScanPreviewAlignment();
+                            var osmPreviewAlignment = ComposeOsmPreviewAlignment();
+
+                            <div class="small text-muted mb-2">
+                                Scan controls move only the LiDAR/scan geometry. Standalone and neighbouring OSM buildings stay pinned unless you explicitly use the OSM controls.
+                            </div>
+
+                            @if (selectedImport is not null)
+                            {
+                                <div class="small mb-2">
+                                    <strong>Source import:</strong> @selectedImport.OriginalFileName
+                                </div>
+                            }
+                            else if (selectedTile.SourceImportIds is { Length: > 1 })
+                            {
+                                <div class="small text-warning mb-2">
+                                    This tile was built from @selectedTile.SourceImportIds.Length imports, so save/reprocess is disabled here.
+                                </div>
+                            }
+                            else
+                            {
+                                <div class="small text-muted mb-2">
+                                    This tile does not expose a single source import to update from the viewer.
+                                </div>
+                            }
+
+                            <div class="small text-muted">
+                                Saved import alignment: yaw @savedScanAlignment.YawDegrees.ToString("0.###")&deg;,
+                                offset (@savedScanAlignment.OffsetX.ToString("0.###")m, @savedScanAlignment.OffsetY.ToString("0.###")m)
+                                from @(string.IsNullOrWhiteSpace(savedScanAlignment.Source) ? "unspecified source" : savedScanAlignment.Source).
+                            </div>
+                            <div class="small text-muted">
+                                Loaded tile alignment: yaw @bakedScanAlignment.YawDegrees.ToString("0.###")&deg;,
+                                offset (@bakedScanAlignment.OffsetX.ToString("0.###")m, @bakedScanAlignment.OffsetY.ToString("0.###")m).
+                            </div>
+                            <div class="small text-muted">
+                                Current scan preview: yaw @scanPreviewAlignment.YawDegrees.ToString("0.###")&deg;,
+                                offset (@scanPreviewAlignment.OffsetX.ToString("0.###")m, @scanPreviewAlignment.OffsetY.ToString("0.###")m).
+                            </div>
+                            <div class="small text-muted mb-3">
+                                Current OSM preview delta: yaw @osmPreviewAlignment.YawDegrees.ToString("0.###")&deg;,
+                                offset (@osmPreviewAlignment.OffsetX.ToString("0.###")m, @osmPreviewAlignment.OffsetY.ToString("0.###")m). This is diagnostic only and never persists.
+                            </div>
+
+                            @if (!AlignmentValuesMatch(bakedScanAlignment, savedScanAlignment))
+                            {
+                                <div class="small text-warning mb-3">
+                                    The import alignment has been saved, but the currently loaded tile still reflects the older baked alignment. Reprocess the import and reload the tile to make the saved alignment the new baseline.
+                                </div>
+                            }
+
+                            <div class="border rounded p-2 mb-3">
+                                <div class="fw-semibold small mb-2">LiDAR / Scan</div>
+                                <div class="row g-2 alignment-tool-grid">
+                                    <div class="col-4">
+                                        <label class="form-label mb-1">Yaw delta (&deg;)</label>
+                                        <input type="number"
+                                               class="form-control form-control-sm"
+                                               step="0.1"
+                                               value="@FormatAlignmentInput(scanPreviewYawDelta)"
+                                               @oninput="HandleScanPreviewYawInput" />
+                                    </div>
+                                    <div class="col-4">
+                                        <label class="form-label mb-1">X delta (m)</label>
+                                        <input type="number"
+                                               class="form-control form-control-sm"
+                                               step="0.1"
+                                               value="@FormatAlignmentInput(scanPreviewOffsetXDelta)"
+                                               @oninput="HandleScanPreviewOffsetXInput" />
+                                    </div>
+                                    <div class="col-4">
+                                        <label class="form-label mb-1">Y delta (m)</label>
+                                        <input type="number"
+                                               class="form-control form-control-sm"
+                                               step="0.1"
+                                               value="@FormatAlignmentInput(scanPreviewOffsetYDelta)"
+                                               @oninput="HandleScanPreviewOffsetYInput" />
+                                    </div>
+                                    <div class="col-6">
+                                        <label class="form-label mb-1">Rotate step (&deg;)</label>
+                                        <input type="number"
+                                               class="form-control form-control-sm"
+                                               step="0.1"
+                                               value="@FormatAlignmentInput(previewRotateStep)"
+                                               @oninput="HandlePreviewRotateStepInput" />
+                                    </div>
+                                    <div class="col-6">
+                                        <label class="form-label mb-1">Translate step (m)</label>
+                                        <input type="number"
+                                               class="form-control form-control-sm"
+                                               step="0.1"
+                                               value="@FormatAlignmentInput(previewTranslateStep)"
+                                               @oninput="HandlePreviewTranslateStepInput" />
+                                    </div>
+                                </div>
+
+                                <div class="d-grid gap-2 mt-3">
+                                    <div class="btn-group btn-group-sm">
+                                        <button class="btn btn-outline-secondary" @onclick="() => NudgeScanPreviewAlignmentAsync(-previewRotateStep, 0, 0)">Yaw -</button>
+                                        <button class="btn btn-outline-secondary" @onclick="() => NudgeScanPreviewAlignmentAsync(previewRotateStep, 0, 0)">Yaw +</button>
+                                    </div>
+                                    <div class="btn-group btn-group-sm">
+                                        <button class="btn btn-outline-secondary" @onclick="() => NudgeScanPreviewAlignmentAsync(0, -previewTranslateStep, 0)">X -</button>
+                                        <button class="btn btn-outline-secondary" @onclick="() => NudgeScanPreviewAlignmentAsync(0, previewTranslateStep, 0)">X +</button>
+                                    </div>
+                                    <div class="btn-group btn-group-sm">
+                                        <button class="btn btn-outline-secondary" @onclick="() => NudgeScanPreviewAlignmentAsync(0, 0, -previewTranslateStep)">Y -</button>
+                                        <button class="btn btn-outline-secondary" @onclick="() => NudgeScanPreviewAlignmentAsync(0, 0, previewTranslateStep)">Y +</button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="border rounded p-2">
+                                <div class="fw-semibold small mb-2">OSM Fill / OSM-derived Mesh</div>
+                                <div class="small text-muted mb-2">
+                                    Use these only when you deliberately want to compare or offset the OSM-derived geometry in the mesh preview.
+                                </div>
+                                <div class="row g-2 alignment-tool-grid">
+                                    <div class="col-4">
+                                        <label class="form-label mb-1">Yaw delta (&deg;)</label>
+                                        <input type="number"
+                                               class="form-control form-control-sm"
+                                               step="0.1"
+                                               value="@FormatAlignmentInput(osmPreviewYawDelta)"
+                                               @oninput="HandleOsmPreviewYawInput" />
+                                    </div>
+                                    <div class="col-4">
+                                        <label class="form-label mb-1">X delta (m)</label>
+                                        <input type="number"
+                                               class="form-control form-control-sm"
+                                               step="0.1"
+                                               value="@FormatAlignmentInput(osmPreviewOffsetXDelta)"
+                                               @oninput="HandleOsmPreviewOffsetXInput" />
+                                    </div>
+                                    <div class="col-4">
+                                        <label class="form-label mb-1">Y delta (m)</label>
+                                        <input type="number"
+                                               class="form-control form-control-sm"
+                                               step="0.1"
+                                               value="@FormatAlignmentInput(osmPreviewOffsetYDelta)"
+                                               @oninput="HandleOsmPreviewOffsetYInput" />
+                                    </div>
+                                </div>
+
+                                <div class="d-grid gap-2 mt-3">
+                                    <div class="btn-group btn-group-sm">
+                                        <button class="btn btn-outline-secondary" @onclick="() => NudgeOsmPreviewAlignmentAsync(-previewRotateStep, 0, 0)">Yaw -</button>
+                                        <button class="btn btn-outline-secondary" @onclick="() => NudgeOsmPreviewAlignmentAsync(previewRotateStep, 0, 0)">Yaw +</button>
+                                    </div>
+                                    <div class="btn-group btn-group-sm">
+                                        <button class="btn btn-outline-secondary" @onclick="() => NudgeOsmPreviewAlignmentAsync(0, -previewTranslateStep, 0)">X -</button>
+                                        <button class="btn btn-outline-secondary" @onclick="() => NudgeOsmPreviewAlignmentAsync(0, previewTranslateStep, 0)">X +</button>
+                                    </div>
+                                    <div class="btn-group btn-group-sm">
+                                        <button class="btn btn-outline-secondary" @onclick="() => NudgeOsmPreviewAlignmentAsync(0, 0, -previewTranslateStep)">Y -</button>
+                                        <button class="btn btn-outline-secondary" @onclick="() => NudgeOsmPreviewAlignmentAsync(0, 0, previewTranslateStep)">Y +</button>
+                                    </div>
+                                </div>
+
+                                @if (!TileHasOsmFill)
+                                {
+                                    <div class="small text-muted mt-2">
+                                        This tile currently has no baked OSM-fill meshes, so these controls only matter when viewing a mesh that contains OSM-derived geometry.
+                                    </div>
+                                }
+                            </div>
+
+                            @if (HasAnyPreviewAlignmentDelta)
+                            {
+                                <div class="small text-warning mt-2">
+                                    Scan and/or OSM preview deltas are active in the 3D viewer only. The debug map stays on the persisted alignment until you save and reprocess.
+                                </div>
+                            }
+
+                            <div class="d-grid gap-2 mt-3">
+                                <button class="btn btn-sm btn-outline-secondary"
+                                        @onclick="ResetPreviewAlignmentAsync"
+                                        disabled="@(!HasAnyPreviewAlignmentDelta || alignmentBusy)">
+                                    Reset All Preview Deltas
+                                </button>
+                                <button class="btn btn-sm btn-success"
+                                        @onclick="() => SavePreviewAlignmentAsync(false)"
+                                        disabled="@(!CanPersistAlignment || alignmentBusy)">
+                                    Save Scan Alignment
+                                </button>
+                                <button class="btn btn-sm btn-primary"
+                                        @onclick="() => SavePreviewAlignmentAsync(true)"
+                                        disabled="@(!CanPersistAlignment || alignmentBusy)">
+                                    Save Scan + Reprocess
+                                </button>
+                            </div>
+
+                            @if (latestAlignmentReprocessJob is not null)
+                            {
+                                <div class="small text-muted mt-2">
+                                    Reprocess job queued: @latestAlignmentReprocessJob.JobId
+                                </div>
+                            }
+                        }
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">Segments</div>
+                    <div class="card-body p-0" style="max-height: 280px; overflow-y:auto">
+                        @if (selectedTile is null)
+                        {
+                            <div class="p-3 text-muted">Select a tile to inspect its segments.</div>
+                        }
+                        else if (!segments.Any())
+                        {
+                            <div class="p-3 text-muted">This tile has no persisted segment metadata yet. Reprocess it with the segment pipeline.</div>
+                        }
+                        else
+                        {
+                            <table class="table table-sm mb-0">
+                                <thead><tr><th>ID</th><th>Label</th><th>OSM</th><th>Pts</th></tr></thead>
+                                <tbody>
+                                    @foreach (var segment in segments)
+                                    {
+                                        <tr class="@(selectedSegment?.Id == segment.Id ? "table-active" : "")"
+                                            @onclick="() => SelectSegmentAsync(segment)"
+                                            style="cursor:pointer">
+                                            <td>#@segment.LocalSegmentId</td>
+                                            <td>
+                                                <div>@(segment.ReviewedLabel ?? segment.PredictedLabel)</div>
+                                                <div class="small text-muted">conf @((segment.Confidence ?? 0f).ToString("0.00"))</div>
+                                                <div class="small text-muted">
+                                                    @segment.GeometrySource
+                                                    @if (segment.HasOsmFill)
+                                                    {
+                                                        <span> • OSM fill baked in</span>
+                                                    }
+                                                </div>
+                                            </td>
+                                            <td>
+                                                <div>@(string.IsNullOrWhiteSpace(segment.OsmName) ? (segment.OsmFeatureType ?? segment.OsmMatchStatus) : segment.OsmName)</div>
+                                                <div class="small text-muted">@segment.OsmMatchStatus</div>
+                                            </td>
+                                            <td>@segment.PointCount.ToString("N0")</td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        }
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-12 col-xl-8 col-xxl-9">
+            <div class="row g-3">
+                <div class="col-12 col-xxl-8">
+                    <div class="card h-100">
+                        <div class="card-header">3D Preview</div>
+                        <div class="card-body">
+                            <div class="viewer-stage">
+                                <div id="viewer-3d" class="viewer-surface"></div>
+                                @if (displayedTileId is null)
+                                {
+                                    <div class="viewer-empty-state">
+                                        <div class="text-center">
+                                            <div class="mb-2" style="font-size: 3rem">🏗️</div>
+                                            <div>Select a tile and load a mesh or point cloud.</div>
+                                        </div>
+                                    </div>
+                                }
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="col-12 col-xxl-4">
+                    <div class="card h-100">
+                        <div class="card-header">Alignment Debug Map</div>
+                        <div class="card-body d-flex flex-column">
+                            <div id="viewer-alignment-map" class="viewer-map-canvas"></div>
+                            @if (selectedTile is null)
+                            {
+                                <div class="small text-muted mt-2">Select a tile to compare tile bounds, segment bounds, centroids, OSM footprints, and Vicmaps parcel boundaries.</div>
+                            }
+                            else if (alignmentDebug is null)
+                            {
+                                <div class="small text-muted mt-2">Alignment diagnostics are unavailable for this tile.</div>
+                            }
+                            else
+                            {
+                                <div class="small text-muted mt-2">
+                                    Showing @alignmentDebug.Segments.Count segment bounds, @BuildOsmCoverageMessage(alignmentDebug.OsmBuildings) in-bounds OSM footprints, and @BuildVicmapCoverageMessage(alignmentDebug) in the 3D preview.
+                                </div>
+                                @if (alignmentDebug.Alignment is not null)
+                                {
+                                    <div class="small text-muted">@BuildAlignmentMessage(alignmentDebug.Alignment)</div>
+                                }
+                                else
+                                {
+                                    <div class="small text-muted">No persisted alignment correction is currently recorded for this tile.</div>
+                                }
+
+                                @if (!string.IsNullOrWhiteSpace(alignmentDebug.VicmapFetchError))
+                                {
+                                    <div class="small text-warning">@alignmentDebug.VicmapFetchError</div>
+                                }
+
+                                @if (HasAnyPreviewAlignmentDelta)
+                                {
+                                    <div class="small text-warning">Live scan and/or OSM preview deltas are active in the 3D viewer; this map still reflects the persisted alignment.</div>
+                                }
+                            }
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+@code {
+    private List<TileEntry> tiles = [];
+    private List<TileSegmentItem> segments = [];
+    private TileAlignmentDebug? alignmentDebug;
+    private TileEntry? selectedTile;
+    private TileSegmentItem? selectedSegment;
+    private ImportRecordItem? selectedImport;
+    private bool viewerReady;
+    private bool alignmentBusy;
+    private string? activeViewMode;
+    private Guid? displayedTileId;
+    private ProcessStartResult? latestAlignmentReprocessJob;
+    private double scanPreviewYawDelta;
+    private double scanPreviewOffsetXDelta;
+    private double scanPreviewOffsetYDelta;
+    private double osmPreviewYawDelta;
+    private double osmPreviewOffsetXDelta;
+    private double osmPreviewOffsetYDelta;
+    private double previewRotateStep = 0.5d;
+    private double previewTranslateStep = 0.5d;
+    private string viewerMsg = "";
+
+    protected override async Task OnInitializedAsync()
+    {
+        tiles = await Api.GetTileCatalogAsync();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender && !viewerReady)
+        {
+            viewerReady = true;
+            await JS.InvokeVoidAsync("libreRallyMaps.viewer.init", "viewer-3d");
+        }
+    }
+
+    private async Task LoadMesh()
+    {
+        if (selectedTile is null) return;
+        await EnsureViewerReadyAsync();
+        viewerMsg = "Loading mesh...";
+        StateHasChanged();
+
+        // GLB served by proxy at /data/tiles/ — quadtree naming: {zoom}.{x}.{y}.glb
+        var glbUrl = $"/data/tiles/{selectedTile.ZoomLevel}.{selectedTile.TileX}.{selectedTile.TileY}/{selectedTile.ZoomLevel}.{selectedTile.TileX}.{selectedTile.TileY}.glb";
+        await JS.InvokeVoidAsync("libreRallyMaps.viewer.loadGlb", glbUrl, segments);
+        await JS.InvokeVoidAsync("libreRallyMaps.viewer.setAlignmentOverlay", alignmentDebug);
+        await JS.InvokeVoidAsync("libreRallyMaps.viewer.setPreviewAlignment", BuildPreviewDeltaPayload());
+        activeViewMode = "mesh";
+        displayedTileId = selectedTile.Id;
+        await ApplySelectedSegmentAsync();
+        viewerMsg = selectedSegment is null
+            ? $"Loaded mesh for tile ({selectedTile.TileX},{selectedTile.TileY})"
+            : BuildSelectionMessage(selectedSegment, "Highlighted");
+    }
+
+    private async Task LoadPointCloud()
+    {
+        if (selectedTile is null) return;
+        await EnsureViewerReadyAsync();
+
+        try
+        {
+            viewerMsg = "Loading point cloud preview...";
+            StateHasChanged();
+
+            var preview = await Api.GetPointCloudPreviewAsync(selectedTile.Id);
+            if (preview is null || preview.Points.Length < 3)
+            {
+                viewerMsg = "No point cloud preview is available for this tile yet.";
+                return;
+            }
+
+            await JS.InvokeVoidAsync("libreRallyMaps.viewer.loadPointCloud", preview.Points, preview.Colors, preview.SegmentIds);
+            await JS.InvokeVoidAsync("libreRallyMaps.viewer.setAlignmentOverlay", alignmentDebug);
+            await JS.InvokeVoidAsync("libreRallyMaps.viewer.setPreviewAlignment", BuildPreviewDeltaPayload());
+            activeViewMode = "pointcloud";
+            displayedTileId = selectedTile.Id;
+            await ApplySelectedSegmentAsync();
+            viewerMsg = selectedSegment is null
+                ? (segments.Any()
+                    ? $"Loaded segmented point cloud preview from {preview.FileName} ({preview.SampledPoints:N0} / {preview.TotalPoints:N0} points across {segments.Count} segments)."
+                    : $"Loaded point cloud preview from {preview.FileName} ({preview.SampledPoints:N0} / {preview.TotalPoints:N0} points).")
+                : BuildSelectionMessage(selectedSegment, "Highlighted");
+        }
+        catch (HttpRequestException ex)
+        {
+            viewerMsg = string.IsNullOrWhiteSpace(ex.Message)
+                ? "Point cloud preview is unavailable for this tile."
+                : ex.Message;
+        }
+        catch (JSException)
+        {
+            viewerMsg = "Point cloud preview loaded, but the browser viewer could not render it.";
+        }
+        StateHasChanged();
+    }
+
+    private async Task ClearView()
+    {
+        await JS.InvokeVoidAsync("libreRallyMaps.viewer.dispose");
+        viewerReady = false;
+        activeViewMode = null;
+        displayedTileId = null;
+        viewerMsg = "";
+        await JS.InvokeVoidAsync("libreRallyMaps.disposeAlignmentMap");
+        StateHasChanged();
+    }
+
+    private async Task SelectTileAsync(TileEntry tile)
+    {
+        selectedTile = tile;
+        segments = await Api.GetTileSegmentsAsync(tile.Id);
+        alignmentDebug = await Api.GetTileAlignmentDebugAsync(tile.Id);
+        selectedImport = await ResolveSelectedImportAsync(tile);
+        latestAlignmentReprocessJob = null;
+        scanPreviewYawDelta = 0d;
+        scanPreviewOffsetXDelta = 0d;
+        scanPreviewOffsetYDelta = 0d;
+        osmPreviewYawDelta = 0d;
+        osmPreviewOffsetXDelta = 0d;
+        osmPreviewOffsetYDelta = 0d;
+        selectedSegment = null;
+        if (viewerReady)
+        {
+            await JS.InvokeVoidAsync("libreRallyMaps.viewer.setAlignmentOverlay", (object?)null);
+            await JS.InvokeVoidAsync("libreRallyMaps.viewer.setPreviewAlignment", BuildPreviewDeltaPayload());
+            await JS.InvokeVoidAsync("libreRallyMaps.viewer.clearSegmentSelection");
+            await JS.InvokeVoidAsync("libreRallyMaps.viewer.resetReferenceBounds");
+        }
+        await RefreshAlignmentMapAsync();
+        viewerMsg = segments.Any()
+            ? $"Loaded metadata for {segments.Count} segments. Load the point cloud to inspect the segment coloring."
+            : "This tile does not have segment metadata yet.";
+        StateHasChanged();
+    }
+
+    private async Task SelectSegmentAsync(TileSegmentItem segment)
+    {
+        if (selectedSegment?.Id == segment.Id)
+        {
+            await ShowWholeTileAsync();
+            return;
+        }
+
+        selectedSegment = segment;
+        if (IsViewingSelectedTile())
+            await ApplySelectedSegmentAsync();
+
+        viewerMsg = activeViewMode is null || !IsViewingSelectedTile()
+            ? $"Selected segment #{segment.LocalSegmentId}. Load the mesh or point cloud to inspect it."
+            : BuildSelectionMessage(segment, "Highlighted");
+        await RefreshAlignmentHighlightAsync();
+        StateHasChanged();
+    }
+
+    private async Task ShowWholeTileAsync()
+    {
+        selectedSegment = null;
+        if (viewerReady)
+        {
+            await JS.InvokeVoidAsync("libreRallyMaps.viewer.clearSegmentSelection");
+            if (activeViewMode is not null)
+                await JS.InvokeVoidAsync("libreRallyMaps.viewer.showWholeTile");
+        }
+
+        viewerMsg = activeViewMode is null
+            ? "Segment selection cleared."
+            : "Showing the full tile again (north up).";
+        await RefreshAlignmentHighlightAsync();
+        StateHasChanged();
+    }
+
+    private async Task EnsureViewerReadyAsync()
+    {
+        if (viewerReady)
+        {
+            return;
+        }
+
+        viewerReady = true;
+        await JS.InvokeVoidAsync("libreRallyMaps.viewer.init", "viewer-3d");
+    }
+
+    private async Task ApplySelectedSegmentAsync()
+    {
+        if (!viewerReady || !IsViewingSelectedTile())
+            return;
+
+        if (selectedSegment is null)
+        {
+            await JS.InvokeVoidAsync("libreRallyMaps.viewer.clearSegmentSelection");
+            await RefreshAlignmentHighlightAsync();
+            return;
+        }
+
+        await JS.InvokeVoidAsync("libreRallyMaps.viewer.selectSegment", selectedSegment.LocalSegmentId);
+        await RefreshAlignmentHighlightAsync();
+    }
+
+    private async Task RefreshAlignmentMapAsync()
+    {
+        if (selectedTile is null || alignmentDebug is null)
+        {
+            await JS.InvokeVoidAsync("libreRallyMaps.disposeAlignmentMap");
+            return;
+        }
+
+        await JS.InvokeVoidAsync("libreRallyMaps.initAlignmentMap", "viewer-alignment-map", alignmentDebug);
+        await RefreshAlignmentHighlightAsync();
+    }
+
+    private async Task RefreshAlignmentHighlightAsync()
+    {
+        if (selectedSegment is null)
+        {
+            await JS.InvokeVoidAsync("libreRallyMaps.clearAlignmentHighlight");
+            return;
+        }
+
+        await JS.InvokeVoidAsync("libreRallyMaps.highlightAlignmentSegment", selectedSegment.LocalSegmentId);
+    }
+
+    private static string BuildSelectionMessage(TileSegmentItem segment, string action)
+    {
+        var label = segment.ReviewedLabel ?? segment.PredictedLabel;
+        var provenance = segment.HasOsmFill ? " with baked OSM fill" : string.Empty;
+        return $"{action} segment #{segment.LocalSegmentId} ({label}{provenance}) and dimmed the rest.";
+    }
+
+    private static string BuildAlignmentMessage(TileAlignmentInfo alignment)
+    {
+        var source = string.IsNullOrWhiteSpace(alignment.Source) ? "unspecified source" : alignment.Source;
+        return $"Alignment correction: yaw {alignment.YawDegrees:0.##}°, offset ({alignment.OffsetX:0.##}m, {alignment.OffsetY:0.##}m) from {source}.";
+    }
+
+    private static string BuildOsmCoverageMessage(IReadOnlyCollection<TileAlignmentOsmBuilding> osmBuildings)
+    {
+        var matched = osmBuildings.Count(building => building.IsMatched);
+        return $"{matched} matched / {osmBuildings.Count} total";
+    }
+
+    private static string BuildVicmapCoverageMessage(TileAlignmentDebug alignment)
+    {
+        if (!string.IsNullOrWhiteSpace(alignment.VicmapFetchError))
+            return "Vicmaps boundary overlay unavailable";
+
+        return alignment.VicmapProperties.Count == 0
+            ? "0 Vicmaps parcel boundaries"
+            : $"{alignment.VicmapProperties.Count} Vicmaps parcel boundaries";
+    }
+
+    private TileAlignmentInfo GetBakedAlignment() => alignmentDebug?.Alignment ?? new TileAlignmentInfo();
+
+    private TileAlignmentInfo GetSavedScanAlignment()
+    {
+        if (selectedImport is null)
+            return GetBakedAlignment();
+
+        return new TileAlignmentInfo
+        {
+            YawDegrees = selectedImport.AlignmentYawDegrees ?? 0d,
+            OffsetX = selectedImport.AlignmentOffsetX ?? 0d,
+            OffsetY = selectedImport.AlignmentOffsetY ?? 0d,
+            Source = string.IsNullOrWhiteSpace(selectedImport.AlignmentSource) ? null : selectedImport.AlignmentSource,
+            UpdatedAt = selectedImport.AlignmentUpdatedAt
+        };
+    }
+
+    private TileAlignmentInfo ComposeScanPreviewAlignment()
+        => ComposeAlignment(GetBakedAlignment(), scanPreviewYawDelta, scanPreviewOffsetXDelta, scanPreviewOffsetYDelta);
+
+    private TileAlignmentInfo ComposeOsmPreviewAlignment()
+        => ComposeAlignment(new TileAlignmentInfo(), osmPreviewYawDelta, osmPreviewOffsetXDelta, osmPreviewOffsetYDelta);
+
+    private static TileAlignmentInfo ComposeAlignment(
+        TileAlignmentInfo baseAlignment,
+        double yawDelta,
+        double offsetXDelta,
+        double offsetYDelta)
+    {
+        var deltaRadians = yawDelta * Math.PI / 180d;
+        var cos = Math.Cos(deltaRadians);
+        var sin = Math.Sin(deltaRadians);
+
+        return new TileAlignmentInfo
+        {
+            YawDegrees = NormalizeDegrees(baseAlignment.YawDegrees + yawDelta),
+            OffsetX = (baseAlignment.OffsetX * cos) - (baseAlignment.OffsetY * sin) + offsetXDelta,
+            OffsetY = (baseAlignment.OffsetX * sin) + (baseAlignment.OffsetY * cos) + offsetYDelta,
+            Source = baseAlignment.Source,
+            UpdatedAt = baseAlignment.UpdatedAt
+        };
+    }
+
+    private static bool AlignmentValuesMatch(TileAlignmentInfo left, TileAlignmentInfo right)
+        => Math.Abs(left.YawDegrees - right.YawDegrees) < 0.0001d &&
+           Math.Abs(left.OffsetX - right.OffsetX) < 0.0001d &&
+           Math.Abs(left.OffsetY - right.OffsetY) < 0.0001d &&
+           string.Equals(left.Source, right.Source, StringComparison.OrdinalIgnoreCase);
+
+    private bool HasScanPreviewAlignmentDelta =>
+        Math.Abs(scanPreviewYawDelta) > 0.0001d ||
+        Math.Abs(scanPreviewOffsetXDelta) > 0.0001d ||
+        Math.Abs(scanPreviewOffsetYDelta) > 0.0001d;
+
+    private bool HasOsmPreviewAlignmentDelta =>
+        Math.Abs(osmPreviewYawDelta) > 0.0001d ||
+        Math.Abs(osmPreviewOffsetXDelta) > 0.0001d ||
+        Math.Abs(osmPreviewOffsetYDelta) > 0.0001d;
+
+    private bool HasAnyPreviewAlignmentDelta => HasScanPreviewAlignmentDelta || HasOsmPreviewAlignmentDelta;
+
+    private bool CanPersistAlignment =>
+        selectedImport is not null &&
+        selectedTile?.SourceImportIds is { Length: 1 } &&
+        string.Equals(selectedImport.Status, "active", StringComparison.OrdinalIgnoreCase);
+
+    private bool TileHasOsmFill => segments.Any(segment => segment.HasOsmFill);
+
+    private static string FormatAlignmentInput(double value) => value.ToString("0.###", CultureInfo.InvariantCulture);
+
+    private object BuildPreviewDeltaPayload() => new
+    {
+        scan = new
+        {
+            yawDegrees = scanPreviewYawDelta,
+            offsetX = scanPreviewOffsetXDelta,
+            offsetY = scanPreviewOffsetYDelta
+        },
+        osm = new
+        {
+            yawDegrees = osmPreviewYawDelta,
+            offsetX = osmPreviewOffsetXDelta,
+            offsetY = osmPreviewOffsetYDelta
+        }
+    };
+
+    private async Task HandleScanPreviewYawInput(ChangeEventArgs args)
+    {
+        scanPreviewYawDelta = ParseAlignmentInput(args.Value, scanPreviewYawDelta);
+        await ApplyPreviewAlignmentAsync();
+    }
+
+    private async Task HandleScanPreviewOffsetXInput(ChangeEventArgs args)
+    {
+        scanPreviewOffsetXDelta = ParseAlignmentInput(args.Value, scanPreviewOffsetXDelta);
+        await ApplyPreviewAlignmentAsync();
+    }
+
+    private async Task HandleScanPreviewOffsetYInput(ChangeEventArgs args)
+    {
+        scanPreviewOffsetYDelta = ParseAlignmentInput(args.Value, scanPreviewOffsetYDelta);
+        await ApplyPreviewAlignmentAsync();
+    }
+
+    private async Task HandleOsmPreviewYawInput(ChangeEventArgs args)
+    {
+        osmPreviewYawDelta = ParseAlignmentInput(args.Value, osmPreviewYawDelta);
+        await ApplyPreviewAlignmentAsync();
+    }
+
+    private async Task HandleOsmPreviewOffsetXInput(ChangeEventArgs args)
+    {
+        osmPreviewOffsetXDelta = ParseAlignmentInput(args.Value, osmPreviewOffsetXDelta);
+        await ApplyPreviewAlignmentAsync();
+    }
+
+    private async Task HandleOsmPreviewOffsetYInput(ChangeEventArgs args)
+    {
+        osmPreviewOffsetYDelta = ParseAlignmentInput(args.Value, osmPreviewOffsetYDelta);
+        await ApplyPreviewAlignmentAsync();
+    }
+
+    private Task HandlePreviewRotateStepInput(ChangeEventArgs args)
+    {
+        previewRotateStep = Math.Max(0.1d, ParseAlignmentInput(args.Value, previewRotateStep));
+        StateHasChanged();
+        return Task.CompletedTask;
+    }
+
+    private Task HandlePreviewTranslateStepInput(ChangeEventArgs args)
+    {
+        previewTranslateStep = Math.Max(0.1d, ParseAlignmentInput(args.Value, previewTranslateStep));
+        StateHasChanged();
+        return Task.CompletedTask;
+    }
+
+    private async Task NudgeScanPreviewAlignmentAsync(double yawDelta, double offsetXDelta, double offsetYDelta)
+    {
+        scanPreviewYawDelta += yawDelta;
+        scanPreviewOffsetXDelta += offsetXDelta;
+        scanPreviewOffsetYDelta += offsetYDelta;
+        await ApplyPreviewAlignmentAsync();
+    }
+
+    private async Task NudgeOsmPreviewAlignmentAsync(double yawDelta, double offsetXDelta, double offsetYDelta)
+    {
+        osmPreviewYawDelta += yawDelta;
+        osmPreviewOffsetXDelta += offsetXDelta;
+        osmPreviewOffsetYDelta += offsetYDelta;
+        await ApplyPreviewAlignmentAsync();
+    }
+
+    private async Task ResetPreviewAlignmentAsync()
+    {
+        scanPreviewYawDelta = 0d;
+        scanPreviewOffsetXDelta = 0d;
+        scanPreviewOffsetYDelta = 0d;
+        osmPreviewYawDelta = 0d;
+        osmPreviewOffsetXDelta = 0d;
+        osmPreviewOffsetYDelta = 0d;
+        await ApplyPreviewAlignmentAsync();
+        viewerMsg = selectedTile is null
+            ? string.Empty
+            : "Preview scan and OSM deltas reset to the currently loaded tile baseline.";
+    }
+
+    private async Task ApplyPreviewAlignmentAsync()
+    {
+        if (viewerReady && IsViewingSelectedTile())
+            await JS.InvokeVoidAsync("libreRallyMaps.viewer.setPreviewAlignment", BuildPreviewDeltaPayload());
+
+        StateHasChanged();
+    }
+
+    private async Task SavePreviewAlignmentAsync(bool reprocess)
+    {
+        if (!CanPersistAlignment || selectedImport is null)
+        {
+            viewerMsg = "This viewer can only persist alignment changes for a tile backed by a single active import.";
+            StateHasChanged();
+            return;
+        }
+
+        alignmentBusy = true;
+        latestAlignmentReprocessJob = null;
+        StateHasChanged();
+
+        try
+        {
+            var composedAlignment = ComposeScanPreviewAlignment();
+            await Api.UpdateImportAlignmentAsync(
+                selectedImport.Id,
+                new ImportAlignmentUpdateRequest(
+                    Clear: false,
+                    YawDegrees: composedAlignment.YawDegrees,
+                    OffsetX: composedAlignment.OffsetX,
+                    OffsetY: composedAlignment.OffsetY,
+                    Source: "viewer_manual"));
+
+            selectedImport.AlignmentYawDegrees = composedAlignment.YawDegrees;
+            selectedImport.AlignmentOffsetX = composedAlignment.OffsetX;
+            selectedImport.AlignmentOffsetY = composedAlignment.OffsetY;
+            selectedImport.AlignmentSource = "viewer_manual";
+            selectedImport.AlignmentUpdatedAt = DateTime.UtcNow;
+
+            if (reprocess)
+            {
+                latestAlignmentReprocessJob = await Api.StartPipelineForImportsAsync([selectedImport.Id]);
+                viewerMsg = $"Saved the scan alignment to the source import and queued reprocess job {latestAlignmentReprocessJob.JobId}. The currently loaded tile will keep its preview delta until rebuilt; OSM preview deltas remain viewer-only.";
+            }
+            else
+            {
+                viewerMsg = "Saved the scan alignment to the source import. Reprocess the import to bake it into the tile outputs; OSM preview deltas remain viewer-only.";
+            }
+        }
+        catch (HttpRequestException ex)
+        {
+            viewerMsg = string.IsNullOrWhiteSpace(ex.Message)
+                ? "The alignment update failed."
+                : ex.Message;
+        }
+        finally
+        {
+            alignmentBusy = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task<ImportRecordItem?> ResolveSelectedImportAsync(TileEntry tile)
+    {
+        if (tile.SourceImportIds is not { Length: 1 })
+            return null;
+
+        var imports = await Api.GetImportsAsync();
+        return imports.FirstOrDefault(importRecord => importRecord.Id == tile.SourceImportIds[0]);
+    }
+
+    private static double ParseAlignmentInput(object? rawValue, double fallbackValue)
+    {
+        var text = Convert.ToString(rawValue, CultureInfo.InvariantCulture);
+        if (string.IsNullOrWhiteSpace(text))
+            return 0d;
+
+        return double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var invariantValue)
+            ? invariantValue
+            : double.TryParse(text, NumberStyles.Float, CultureInfo.CurrentCulture, out var currentValue)
+                ? currentValue
+                : fallbackValue;
+    }
+
+    private static double NormalizeDegrees(double degrees)
+    {
+        while (degrees <= -180d)
+            degrees += 360d;
+
+        while (degrees > 180d)
+            degrees -= 360d;
+
+        return degrees;
+    }
+
+    private bool IsViewingSelectedTile() => selectedTile is not null && displayedTileId == selectedTile.Id;
+}

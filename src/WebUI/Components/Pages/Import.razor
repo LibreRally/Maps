@@ -1,0 +1,471 @@
+@page "/import"
+@using LibreRally.Maps.WebUI
+@inject TileApiClient Api
+@implements IDisposable
+@rendermode InteractiveServer
+
+<PageTitle>Import Data — LibreRally Maps</PageTitle>
+
+<div class="container-fluid">
+    <h3 class="mb-4">Import Data</h3>
+
+    @if (!string.IsNullOrEmpty(statusMessage))
+    {
+        <div class="alert alert-info">@statusMessage</div>
+    }
+
+    @if (!string.IsNullOrEmpty(errorMessage))
+    {
+        <div class="alert alert-danger" style="white-space:pre-wrap">@errorMessage</div>
+    }
+
+    <div class="row g-3 mb-3">
+        <div class="col-sm-6 col-xl-3">
+            <div class="card h-100">
+                <div class="card-body">
+                    <div class="text-muted small text-uppercase">Active imports</div>
+                    <div class="fs-4 fw-semibold">@imports.Count(importRecord => importRecord.Status == "active")</div>
+                    <div class="small text-muted">Imports currently contributing to the point bucket.</div>
+                </div>
+            </div>
+        </div>
+        <div class="col-sm-6 col-xl-3">
+            <div class="card h-100">
+                <div class="card-body">
+                    <div class="text-muted small text-uppercase">LAS jobs</div>
+                    <div class="fs-4 fw-semibold">@jobs.Count(job => job.Type == "las")</div>
+                    <div class="small text-muted">@jobs.Count(job => job.Type == "las" && IsActiveStatus(job.Status)) in progress.</div>
+                </div>
+            </div>
+        </div>
+        <div class="col-sm-6 col-xl-3">
+            <div class="card h-100">
+                <div class="card-body">
+                    <div class="text-muted small text-uppercase">Processing jobs</div>
+                    <div class="fs-4 fw-semibold">@pipelineJobs.Count</div>
+                    <div class="small text-muted">@pipelineJobs.Count(job => IsActiveStatus(job.Status)) running or queued.</div>
+                </div>
+            </div>
+        </div>
+        <div class="col-sm-6 col-xl-3">
+            <div class="card h-100">
+                <div class="card-body">
+                    <div class="text-muted small text-uppercase">Recent tiles</div>
+                    <div class="fs-4 fw-semibold">@jobs.Count(job => job.TileX.HasValue)</div>
+                    <div class="small text-muted">Import jobs that have already produced a tile target.</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row">
+        <div class="col-md-6">
+            <div class="card mb-3">
+                <div class="card-header">Point Cloud (LAS/LAZ)</div>
+                <div class="card-body">
+                    <p class="text-muted">Upload a LAS/LAZ file. The upload returns immediately, then the server analyzes, deduplicates, and processes it in the background.</p>
+                    <InputFile OnChange="OnLasSelected" accept=".las,.laz" />
+                    @if (lasFile is not null)
+                    {
+                        <div class="mt-2 alert alert-info">
+                            <strong>@lasFile.Name</strong> (@(lasFile.Size / 1024.0 / 1024.0):F1 MB)
+                        </div>
+                    }
+                    <button class="btn btn-primary mt-3" disabled="@(lasFile is null || uploading)" @onclick="UploadLas">
+                        @(uploading ? "Uploading..." : "Import LAS")
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-md-6">
+            <div class="card mb-3">
+                <div class="card-header">OpenStreetMap (PBF)</div>
+                <div class="card-body">
+                    <p class="text-muted">Load OSM data into PostGIS for spatial enrichment. It is useful context, but it does not block automatic mesh generation.</p>
+                    <div class="mb-2">
+                        <label class="form-label">PBF file path</label>
+                        <input class="form-control" @bind="osmPath" placeholder="data/raw/victoria-latest.osm.pbf" />
+                    </div>
+                    <button class="btn btn-primary" disabled="@(string.IsNullOrEmpty(osmPath) || importingOsm)" @onclick="ImportOsm">
+                        @(importingOsm ? "Importing..." : "Import OSM")
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    @if (jobs.Any())
+    {
+        <div class="card mt-3">
+            <div class="card-header d-flex justify-content-between">
+                <span>Import Jobs (@jobs.Count)</span>
+                <button class="btn btn-sm btn-outline-secondary" @onclick="RefreshJobs">Refresh</button>
+            </div>
+            <div class="card-body p-0">
+                <table class="table table-sm mb-0">
+                    <thead><tr><th>File</th><th>Type</th><th>Status</th><th>Progress</th><th>Details</th><th>Time</th><th>Output</th></tr></thead>
+                    <tbody>
+                        @foreach (var j in jobs)
+                        {
+                            var linkedPipeline = GetLinkedPipeline(j);
+                            <tr>
+                                <td>@j.FileName</td>
+                                <td><span class="badge bg-secondary">@j.Type</span></td>
+                                <td>
+                                    <span class="badge @GetStatusBadgeClass(j.Status)" title="@j.Error">@FormatStatus(j.Status)</span>
+                                    @if (!string.IsNullOrEmpty(j.Error))
+                                    {
+                                       <div class="mt-1"><small class="text-danger" style="white-space:pre-wrap;word-break:break-all">@j.Error</small></div>
+                                    }
+                                </td>
+                                <td style="min-width: 220px;">
+                                    <div class="small fw-semibold">@GetProgressSummary(j.CurrentStage, j.TotalStages)</div>
+                                    <div class="progress" style="height: 0.6rem;">
+                                       <div class="progress-bar @GetProgressBarClass(j.Status) @(IsActiveStatus(j.Status) ? "progress-bar-striped progress-bar-animated" : null)"
+                                            role="progressbar"
+                                            style="width:@($"{GetProgressPercent(j.CurrentStage, j.TotalStages, j.Status)}%")"
+                                            aria-valuenow="@GetProgressPercent(j.CurrentStage, j.TotalStages, j.Status)"
+                                            aria-valuemin="0"
+                                            aria-valuemax="100"></div>
+                                    </div>
+                                    @if (linkedPipeline is not null && linkedPipeline.TotalBatches > 1)
+                                    {
+                                       <div><small class="text-muted">@GetBatchSummary(linkedPipeline.CurrentBatchIndex, linkedPipeline.TotalBatches)</small></div>
+                                    }
+                                    @if (j.TotalSteps > 0)
+                                    {
+                                       <div><small class="text-muted">@j.CompletedSteps:N0 / @j.TotalSteps:N0 points analyzed</small></div>
+                                    }
+                                </td>
+                                <td>
+                                    @if (!string.IsNullOrWhiteSpace(j.Message))
+                                    {
+                                       <div>@j.Message</div>
+                                    }
+                                    @if (linkedPipeline is not null)
+                                    {
+                                       <div><small class="text-muted">Processing job: @FormatStatus(linkedPipeline.Status). @linkedPipeline.Message</small></div>
+                                       @if (linkedPipeline.TotalSteps > 0)
+                                       {
+                                           <div><small class="text-muted">@linkedPipeline.CompletedSteps:N0 / @linkedPipeline.TotalSteps:N0 points loaded for processing</small></div>
+                                       }
+                                    }
+                                    @if (j.UniquePointCount.HasValue || j.NewPointCount.HasValue || j.DuplicatePointCount.HasValue)
+                                    {
+                                       <small class="text-muted">
+                                           unique in import: @((j.UniquePointCount ?? 0).ToString("N0")),
+                                           new to bucket: @((j.NewPointCount ?? 0).ToString("N0")),
+                                           duplicates across imports: @((j.DuplicatePointCount ?? 0).ToString("N0"))
+                                       </small>
+                                       <br />
+                                    }
+                                    @if (j.DuplicateWithinImportCount.HasValue)
+                                    {
+                                       <small class="text-muted">duplicates within file: @j.DuplicateWithinImportCount.Value.ToString("N0")</small>
+                                       <br />
+                                    }
+                                    @if (!string.IsNullOrWhiteSpace(j.OutputPath))
+                                    {
+                                       <div><small><code>@j.OutputPath</code></small></div>
+                                    }
+                                </td>
+                                <td><small>@j.ElapsedSeconds:F0s</small></td>
+                                <td><small>@(j.TileX.HasValue ? $"z{j.ZoomLevel}: ({j.TileX},{j.TileY})" : "active import bucket")</small></td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    }
+
+    @if (pipelineJobs.Any())
+    {
+        <div class="card mt-3">
+            <div class="card-header d-flex justify-content-between">
+                <span>Processing Jobs (@pipelineJobs.Count)</span>
+                <button class="btn btn-sm btn-outline-secondary" @onclick="RefreshJobs">Refresh</button>
+            </div>
+            <div class="card-body p-0">
+                <table class="table table-sm mb-0">
+                    <thead><tr><th>Job</th><th>Status</th><th>Progress</th><th>Details</th><th>Time</th><th>Output</th></tr></thead>
+                    <tbody>
+                        @foreach (var job in pipelineJobs)
+                        {
+                            <tr>
+                                <td>
+                                    <div>@job.FileName</div>
+                                    <small class="text-muted">@((job.SourceImportIds?.Length ?? 0).ToString()) active import(s)</small>
+                                </td>
+                                <td><span class="badge @GetStatusBadgeClass(job.Status)">@FormatStatus(job.Status)</span></td>
+                                <td style="min-width: 220px;">
+                                    <div class="small fw-semibold">@GetProgressSummary(job.CurrentStage, job.TotalStages)</div>
+                                    <div class="progress" style="height: 0.6rem;">
+                                       <div class="progress-bar @GetProgressBarClass(job.Status) @(IsActiveStatus(job.Status) ? "progress-bar-striped progress-bar-animated" : null)"
+                                            role="progressbar"
+                                            style="width:@($"{GetProgressPercent(job.CurrentStage, job.TotalStages, job.Status)}%")"
+                                            aria-valuenow="@GetProgressPercent(job.CurrentStage, job.TotalStages, job.Status)"
+                                            aria-valuemin="0"
+                                            aria-valuemax="100"></div>
+                                    </div>
+                                    @if (job.TotalBatches > 1)
+                                    {
+                                       <div><small class="text-muted">@GetBatchSummary(job.CurrentBatchIndex, job.TotalBatches)</small></div>
+                                    }
+                                    @if (job.TotalSteps > 0)
+                                    {
+                                       <div><small class="text-muted">@job.CompletedSteps:N0 / @job.TotalSteps:N0 points loaded for processing</small></div>
+                                    }
+                                </td>
+                                <td>
+                                    @if (!string.IsNullOrWhiteSpace(job.Message))
+                                    {
+                                       <div>@job.Message</div>
+                                    }
+                                    @if (!string.IsNullOrWhiteSpace(job.Error))
+                                    {
+                                       <div><small class="text-danger" style="white-space:pre-wrap;word-break:break-all">@job.Error</small></div>
+                                    }
+                                </td>
+                                <td><small>@job.ElapsedSeconds:F0s</small></td>
+                                <td><small>@(job.TileX.HasValue ? $"z{job.ZoomLevel}: ({job.TileX},{job.TileY})" : (job.OutputPath ?? "active import bucket"))</small></td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    }
+
+    @if (imports.Any())
+    {
+        <div class="card mt-3">
+            <div class="card-header d-flex justify-content-between">
+                <span>Imports (@imports.Count)</span>
+                <button class="btn btn-sm btn-outline-secondary" @onclick="RefreshJobs">Refresh</button>
+            </div>
+            <div class="card-body p-0">
+                <table class="table table-sm mb-0">
+                    <thead><tr><th>File</th><th>Status</th><th>Points</th><th>Imported</th><th></th></tr></thead>
+                    <tbody>
+                        @foreach (var importRecord in imports)
+                        {
+                            <tr>
+                                <td>
+                                    <div>@importRecord.OriginalFileName</div>
+                                    <small class="text-muted">@importRecord.Source</small>
+                                </td>
+                                <td>
+                                    <span class="badge @(importRecord.Status == "active" ? "bg-success" : importRecord.Status == "rejected" ? "bg-warning text-dark" : "bg-secondary")">
+                                        @importRecord.Status
+                                    </span>
+                                    @if (!string.IsNullOrWhiteSpace(importRecord.RejectionReason))
+                                    {
+                                        <div><small class="text-danger">@importRecord.RejectionReason</small></div>
+                                    }
+                                </td>
+                                <td>
+                                    <small>
+                                        total: @((importRecord.TotalPointCount ?? 0).ToString("N0"))<br />
+                                        unique: @((importRecord.UniquePointCount ?? 0).ToString("N0"))<br />
+                                        new: @((importRecord.NewPointCount ?? 0).ToString("N0"))<br />
+                                        duplicates: @((importRecord.DuplicatePointCount ?? 0).ToString("N0"))
+                                    </small>
+                                </td>
+                                <td><small>@importRecord.ImportedAt.ToLocalTime().ToString("g")</small></td>
+                                <td class="text-end">
+                                    @if (importRecord.Status == "active")
+                                    {
+                                        <button class="btn btn-sm btn-outline-danger"
+                                                disabled="@(deletingImportId == importRecord.Id)"
+                                                @onclick="() => DeleteImport(importRecord.Id)">
+                                            @(deletingImportId == importRecord.Id ? "Deleting..." : "Delete")
+                                        </button>
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    }
+</div>
+
+@code {
+    private IBrowserFile? lasFile;
+    private bool uploading, importingOsm;
+    private Guid? deletingImportId;
+    private string osmPath = "data/raw/victoria-latest.osm.pbf";
+    private List<ImportJobDisplay> jobs = [];
+    private List<ImportRecordItem> imports = [];
+    private List<PipelineJob> pipelineJobs = [];
+    private Timer? pollTimer;
+    private string? statusMessage;
+    private string? errorMessage;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await RefreshJobs();
+        pollTimer = new Timer(async _ => { await RefreshJobs(); await InvokeAsync(StateHasChanged); }, 
+            null, TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(3));
+    }
+
+    public void Dispose() => pollTimer?.Dispose();
+
+    private void OnLasSelected(InputFileChangeEventArgs e) => lasFile = e.File;
+
+    private async Task UploadLas()
+    {
+        if (lasFile is null) return;
+        uploading = true;
+        errorMessage = null;
+
+        try
+        {
+            var result = await Api.UploadLasAsync(lasFile);
+            statusMessage = result.Message ?? $"Uploaded {lasFile.Name}. Background import job {result.Id} is now tracking analysis and processing.";
+            await RefreshJobs();
+            lasFile = null;
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"LAS import failed: {ex.Message}";
+        }
+        finally
+        {
+            uploading = false;
+        }
+    }
+
+    private async Task ImportOsm()
+    {
+        importingOsm = true;
+        errorMessage = null;
+
+        try
+        {
+            await Api.ImportOsmAsync(osmPath);
+            statusMessage = $"Started OSM import for {osmPath}.";
+            await RefreshJobs();
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"OSM import failed to start: {ex.Message}";
+        }
+        finally
+        {
+            importingOsm = false;
+        }
+    }
+
+    private async Task RefreshJobs()
+    {
+        try
+        {
+            var result = await Api.GetImportJobsAsync();
+            if (result is not null) jobs = result;
+            pipelineJobs = await Api.GetPipelineJobsAsync();
+            imports = await Api.GetImportsAsync();
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Couldn't load import jobs: {ex.Message}";
+        }
+    }
+
+    private async Task DeleteImport(Guid importId)
+    {
+        deletingImportId = importId;
+        errorMessage = null;
+
+        try
+        {
+            await Api.DeleteImportAsync(importId);
+            statusMessage = "Import deleted. The active point bucket is being rebuilt.";
+            await RefreshJobs();
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Import deletion failed: {ex.Message}";
+        }
+        finally
+        {
+            deletingImportId = null;
+        }
+    }
+
+    private PipelineJob? GetLinkedPipeline(ImportJobDisplay job)
+        => job.PipelineJobId.HasValue
+            ? pipelineJobs.FirstOrDefault(candidate => candidate.Id == job.PipelineJobId.Value)
+            : null;
+
+    private static string FormatStatus(string status)
+        => status switch
+        {
+            "saving" => "saving",
+            "queued" => "queued",
+            "starting" => "processing",
+            "analyzing" => "analyzing",
+            "registering" => "registering",
+            "assembling_input" => "assembling input",
+            "loading_las" => "loading las",
+            "classifying" => "classifying",
+            "segmenting" => "segmenting",
+            "reconstructing" => "reconstructing",
+            "generating_glb" => "generating glb",
+            "generated_glb" => "generated glb",
+            "registering_tile" => "registering tile",
+            "complete" => "complete",
+            "rejected" => "rejected",
+            "loading" => "loading",
+            _ => status
+        };
+
+    private static string GetStatusBadgeClass(string status)
+        => status switch
+        {
+            "complete" => "bg-success",
+            "error" => "bg-danger",
+            "rejected" => "bg-warning text-dark",
+            "registering_tile" or "loading" => "bg-warning text-dark",
+            "analyzing" or "registering" or "assembling_input" or "starting" or "loading_las" or "classifying" or "segmenting" or "reconstructing" or "generating_glb" or "generated_glb" => "bg-primary",
+            _ => "bg-info text-dark"
+        };
+
+    private static string GetProgressBarClass(string status)
+        => status switch
+        {
+            "complete" => "bg-success",
+            "error" => "bg-danger",
+            "rejected" => "bg-warning",
+            "registering_tile" => "bg-warning",
+            _ => "bg-primary"
+        };
+
+    private static bool IsActiveStatus(string status)
+        => status is not ("complete" or "error" or "rejected");
+
+    private static int GetProgressPercent(int currentStage, int totalStages, string status)
+    {
+        if (string.Equals(status, "complete", StringComparison.OrdinalIgnoreCase))
+            return 100;
+
+        if (totalStages <= 0)
+            return 0;
+
+        var percent = (int)Math.Round(currentStage * 100d / totalStages, MidpointRounding.AwayFromZero);
+        return Math.Clamp(percent, 5, 99);
+    }
+
+    private static string GetProgressSummary(int currentStage, int totalStages)
+        => totalStages > 0
+            ? $"Stage {Math.Clamp(currentStage, 1, totalStages)}/{totalStages}"
+            : "In progress";
+
+    private static string GetBatchSummary(int? currentBatchIndex, int? totalBatches)
+        => currentBatchIndex.HasValue && totalBatches.HasValue && totalBatches.Value > 1
+            ? $"Batch {currentBatchIndex.Value} of {totalBatches.Value} in the active bucket rebuild."
+            : "Processing active import bucket.";
+}

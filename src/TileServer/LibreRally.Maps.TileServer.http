@@ -1,0 +1,6 @@
+@LibreRally.Maps.TileServer_HostAddress = http://localhost:5034
+
+GET {{LibreRally.Maps.TileServer_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

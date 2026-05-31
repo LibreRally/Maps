@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="src/AppHost/LibreRally.Maps.AppHost.csproj" />
+  <Project Path="src/Processing/LibreRally.Maps.Processing.csproj" />
+  <Project Path="src/ServiceDefaults/LibreRally.Maps.ServiceDefaults.csproj" />
+  <Project Path="src/TileServer/LibreRally.Maps.TileServer.csproj" />
+  <Project Path="src/WebUI/LibreRally.Maps.WebUI.csproj" />
+</Solution>

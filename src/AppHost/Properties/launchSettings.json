@@ -1,0 +1,20 @@
+{
+  "profiles": {
+    "http": {
+      "commandName": "Project",
+      "launchBrowser": true,
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "DOTNET_ENVIRONMENT": "Development",
+        "ASPIRE_DASHBOARD_OTLP_ENDPOINT_URL": "http://localhost:19096",
+        "ASPIRE_DASHBOARD_MCP_ENDPOINT_URL": "http://localhost:18253",
+        "ASPIRE_RESOURCE_SERVICE_ENDPOINT_URL": "http://localhost:20028",
+        "ASPIRE_ALLOW_UNSECURED_TRANSPORT": "true",
+        "ASPIRE_DASHBOARD_UNSECURED_ALLOW_ANONYMOUS": "true"
+      },
+      "dotnetRunMessages": true,
+      "applicationUrl": "http://0.0.0.0:15107"
+    }
+  },
+  "$schema": "https://json.schemastore.org/launchsettings.json"
+}

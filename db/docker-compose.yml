@@ -1,0 +1,45 @@
+# LibreRally.Maps — PostgreSQL + pgpointcloud + PostGIS
+#
+# Usage:
+#   docker compose up -d
+#
+# This runs alongside .NET Aspire for when you need
+# the pgpointcloud extension pre-installed.
+#
+# Note: The official pgpointcloud Docker image is at:
+#   docker.io/pgpointcloud/pointcloud
+# This compose uses a custom build that adds pgpointcloud
+# to the standard PostGIS image.
+
+services:
+  postgres:
+    image: pgpointcloud/pointcloud:latest
+    container_name: librerallymaps-pg
+    environment:
+      POSTGRES_DB: mapsdb
+      POSTGRES_USER: mapsuser
+      POSTGRES_PASSWORD: mapspass
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mapsuser -d mapsdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: librerallymaps-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: hello@librerally.com
+      PGADMIN_DEFAULT_PASSWORD: password
+    ports:
+      - "5050:80"
+    depends_on:
+      - postgres
+
+volumes:
+  pgdata:
